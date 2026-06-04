@@ -13,16 +13,14 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0"
 }
 
-try:
-    L = instaloader.Instaloader(
-        download_pictures=False,
-        download_videos=False,
-        download_video_thumbnails=False,
-        save_metadata=False,
-        compress_json=False
-    )
-except Exception:
-    L = None
+# Instagram Loader
+L = instaloader.Instaloader(
+    download_pictures=False,
+    download_videos=False,
+    download_video_thumbnails=False,
+    save_metadata=False,
+    compress_json=False
+)
 
 
 @app.after_request
@@ -36,7 +34,7 @@ def add_cors_headers(response):
 @app.route("/")
 def home():
     return jsonify({
-        "success": True,
+        "status": True,
         "owner": "Xeon Vro",
         "apis": {
             "instagram": "/insta?url=",
@@ -51,21 +49,20 @@ def favicon():
     return "", 204
 
 
+# =========================
+# Instagram Downloader
+# =========================
 @app.route("/insta")
 def insta():
+
     url = request.args.get("url")
 
     if not url:
         return jsonify({
-            "success": False,
-            "message": "Missing Instagram URL"
+            "status": False,
+            "owner": "Xeon Vro",
+            "message": "No URL provided"
         }), 400
-
-    if L is None:
-        return jsonify({
-            "success": False,
-            "message": "Instaloader initialization failed"
-        }), 500
 
     try:
         url = url.split("?")[0]
@@ -77,7 +74,8 @@ def insta():
 
         if not match:
             return jsonify({
-                "success": False,
+                "status": False,
+                "owner": "Xeon Vro",
                 "message": "Invalid Instagram URL"
             }), 400
 
@@ -88,28 +86,41 @@ def insta():
             shortcode
         )
 
+        if post.is_video:
+            media = post.video_url
+            media_type = "video"
+        else:
+            media = post.url
+            media_type = "image"
+
         return jsonify({
-            "success": True,
+            "status": True,
+            "owner": "Xeon Vro",
             "platform": "instagram",
-            "type": "video" if post.is_video else "image",
-            "media": post.video_url if post.is_video else post.url
+            "type": media_type,
+            "media": media
         })
 
     except Exception as e:
         return jsonify({
-            "success": False,
+            "status": False,
+            "owner": "Xeon Vro",
             "platform": "instagram",
             "error": str(e)
         }), 500
 
 
+# =========================
+# Facebook Downloader
+# =========================
 @app.route("/fb")
 def fb():
+
     url = request.args.get("url")
 
     if not url:
         return jsonify({
-            "success": False,
+            "status": False,
             "message": "Missing Facebook URL"
         }), 400
 
@@ -125,7 +136,7 @@ def fb():
         data = response.json()
 
         return jsonify({
-            "success": data.get("success", False),
+            "status": data.get("success", False),
             "platform": "facebook",
             "title": data.get("title"),
             "videos": data.get("videos", {})
@@ -133,19 +144,23 @@ def fb():
 
     except Exception as e:
         return jsonify({
-            "success": False,
+            "status": False,
             "platform": "facebook",
             "error": str(e)
         }), 500
 
 
+# =========================
+# Pinterest Downloader
+# =========================
 @app.route("/pin")
 def pin():
+
     url = request.args.get("url")
 
     if not url:
         return jsonify({
-            "success": False,
+            "status": False,
             "message": "Missing Pinterest URL"
         }), 400
 
@@ -154,7 +169,7 @@ def pin():
 
         if not any(domain in parsed.netloc for domain in ["pinterest.com", "pin.it"]):
             return jsonify({
-                "success": False,
+                "status": False,
                 "message": "Invalid Pinterest URL"
             }), 400
 
@@ -179,7 +194,7 @@ def pin():
         )))
 
         return jsonify({
-            "success": True,
+            "status": True,
             "platform": "pinterest",
             "images": images,
             "videos": videos
@@ -187,7 +202,7 @@ def pin():
 
     except Exception as e:
         return jsonify({
-            "success": False,
+            "status": False,
             "platform": "pinterest",
             "error": str(e)
         }), 500
