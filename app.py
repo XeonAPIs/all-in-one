@@ -1,9 +1,10 @@
 from flask import Flask, request, jsonify
+from playwright.sync_api import sync_playwright
 import requests
 import re
 import os
 import json
-from urllib.parse import urlparse, quote
+from urllib.parse import urlparse
 
 app = Flask(__name__)
 
@@ -14,49 +15,20 @@ HEADERS = {
 }
 
 
-def load_cookies(path="cookies.txt"):
-    """Load Netscape-format cookies.txt into a requests CookieJar."""
-    jar = requests.cookies.RequestsCookieJar()
-    if not os.path.exists(path):
-        return jar
-    with open(path, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or line.startswith("HttpOnly,"):
-                continue
-            parts = line.split("\t")
-            if len(parts) >= 7:
-                domain = parts[0]
-                # skip if domain doesn't contain instagram
-                if "instagram" not in domain and ".ig" not in domain:
-                    # still try to include but keep going
-                    pass
-                flag = parts[1]
-                path_c = parts[2]
-                secure = parts[3].lower() == "true"
-                expires = parts[4]
-                name = parts[5]
-                value = parts[6]
-                jar.set(name, value, domain=domain, path=path_c, secure=secure)
-            else:
-                # Handle comma-separated format from some extensions
-                parts2 = line.split(",")
-                if len(parts2) >= 2:
-                    name = parts2[0].strip()
-                    value = parts2[1].strip().strip(";")
-                    jar.set(name, value, domain=".instagram.com", path="/")
-    return jar
+def load_playwright_cookies(context):
+    try:
 
+        if not os.path.exists("cookies.txt"):
+            return
 
-COOKIE_JAR = load_cookies()
+        with open("cookies.txt", "r", encoding="utf-8") as f:
+            cookies = json.load(f)
 
+        if isinstance(cookies, list):
+            context.add_cookies(cookies)
 
-def get_csrf_token():
-    """Extract csrftoken from cookie jar."""
-    for cookie in COOKIE_JAR:
-        if cookie.name == "csrftoken":
-            return cookie.value
-    return ""
+    except Exception as e:
+        print("Cookie load error:", str(e))
 
 
 @app.after_request
@@ -86,7 +58,7 @@ def favicon():
 
 
 # =========================
-# Instagram Downloader (FIXED)
+# Instagram Downloader
 # =========================
 @app.route("/insta")
 def insta():
@@ -102,105 +74,88 @@ def insta():
 
     try:
 
-        url = url.split("?")[0]
+        with sync_playwright() as p:
 
-        match = re.search(
-            r"(?:reel|p|tv)/([^/?]+)",
-            url
-        )
-
-        if not match:
-            return jsonify({
-                "status": False,
-                "owner": "Xeon Vro",
-                "message": "Invalid Instagram URL"
-            }), 400
-
-        shortcode = match.group(1)
-
-        sess = requests.Session()
-        sess.headers.update(HEADERS)
-        sess.cookies.update(COOKIE_JAR)
-
-        response = sess.get(
-            f"https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis",
-            timeout=20
-        )
-
-        if response.status_code != 200:
-            response = sess.get(
-                f"https://www.instagram.com/reel/{shortcode}/?__a=1&__d=dis",
-                timeout=20
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage"
+                ]
             )
 
-        try:
-            data = response.json()
-        except:
-            return jsonify({
-                "status": False,
-                "owner": "Xeon Vro",
-                "platform": "instagram",
-                "error": "Instagram returned invalid response"
-            }), 500
+            context = browser.new_context(
+                user_agent=HEADERS["User-Agent"]
+            )
 
-        media = []
+            load_playwright_cookies(context)
 
-        media_data = (
-            data.get("items", [{}])[0]
-            or data.get("graphql", {}).get("shortcode_media", {})
-            or data.get("data", {}).get("xdt_shortcode_media", {})
-        )
+            page = context.new_page()
 
-        if not media_data:
-            return jsonify({
-                "status": False,
-                "owner": "Xeon Vro",
-                "platform": "instagram",
-                "error": "Media not found"
-            }), 404
+            page.goto(
+                url,
+                wait_until="networkidle",
+                timeout=60000
+            )
 
-        if media_data.get("carousel_media"):
+            page.wait_for_timeout(3000)
 
-            for item in media_data["carousel_media"]:
+            html = page.content()
 
-                if item.get("video_versions"):
-                    media.append({
-                        "type": "video",
-                        "url": item["video_versions"][0]["url"]
-                    })
+            media = []
 
-                elif item.get("image_versions2"):
-                    media.append({
-                        "type": "image",
-                        "url": item["image_versions2"]["candidates"][0]["url"]
-                    })
+            video_matches = set()
 
-        else:
+            for pattern in [
+                r'"video_url":"([^"]+)"',
+                r'https:\\/\\/[^"]+\.mp4[^"]*'
+            ]:
+                video_matches.update(re.findall(pattern, html))
 
-            if media_data.get("video_versions"):
+            image_matches = set()
+
+            for pattern in [
+                r'"display_url":"([^"]+)"',
+                r'https:\\/\\/[^"]+\.(?:jpg|jpeg|webp)[^"]*'
+            ]:
+                image_matches.update(re.findall(pattern, html))
+
+            for video in video_matches:
+
+                video = video.replace("\\u0026", "&")
+                video = video.replace("\\/", "/")
+
                 media.append({
                     "type": "video",
-                    "url": media_data["video_versions"][0]["url"]
+                    "url": video
                 })
 
-            elif media_data.get("display_url"):
+            for image in image_matches:
+
+                image = image.replace("\\u0026", "&")
+                image = image.replace("\\/", "/")
+
                 media.append({
                     "type": "image",
-                    "url": media_data["display_url"]
+                    "url": image
                 })
 
-            elif media_data.get("image_versions2"):
-                media.append({
-                    "type": "image",
-                    "url": media_data["image_versions2"]["candidates"][0]["url"]
-                })
+            browser.close()
 
-        return jsonify({
-            "status": True,
-            "owner": "Xeon Vro",
-            "platform": "instagram",
-            "media": media
-        })
+            if not media:
+                return jsonify({
+                    "status": False,
+                    "owner": "Xeon Vro",
+                    "platform": "instagram",
+                    "error": "No media found"
+                }), 404
+
+            return jsonify({
+                "status": True,
+                "owner": "Xeon Vro",
+                "platform": "instagram",
+                "media": media
+            })
 
     except Exception as e:
 
