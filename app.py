@@ -2,7 +2,6 @@ from flask import Flask, request, jsonify
 import requests
 import re
 import os
-import json
 from urllib.parse import urlparse
 from http.cookiejar import MozillaCookieJar
 
@@ -22,7 +21,6 @@ HEADERS = {
 
 
 def get_insta_session():
-    """Build a requests session loaded with cookies.txt."""
     session = requests.Session()
     session.headers.update(HEADERS)
     cookie_file = "cookies.txt"
@@ -31,6 +29,147 @@ def get_insta_session():
         jar.load(ignore_discard=True, ignore_expires=True)
         session.cookies = jar
     return session
+
+
+def shortcode_to_media_id(shortcode):
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    media_id = 0
+    for char in shortcode:
+        media_id = media_id * 64 + alphabet.index(char)
+    return media_id
+
+
+def _scrape_insta_html(session, url):
+    try:
+        resp = session.get(url, timeout=15)
+        html = resp.text
+
+        video = re.search(r'"video_url"\s*:\s*"([^"]+)"', html)
+        if video:
+            return jsonify({
+                "status": True,
+                "owner": "Xeon Vro",
+                "platform": "instagram",
+                "type": "video",
+                "media": video.group(1).replace("\\u0026", "&")
+            })
+
+        image = re.search(r'"display_url"\s*:\s*"([^"]+)"', html)
+        if image:
+            return jsonify({
+                "status": True,
+                "owner": "Xeon Vro",
+                "platform": "instagram",
+                "type": "image",
+                "media": image.group(1).replace("\\u0026", "&")
+            })
+
+        return jsonify({
+            "status": False,
+            "owner": "Xeon Vro",
+            "platform": "instagram",
+            "message": "Could not extract media. Cookies may be expired."
+        }), 500
+
+    except Exception as e:
+        return jsonify({
+            "status": False,
+            "owner": "Xeon Vro",
+            "platform": "instagram",
+            "error": str(e)
+        }), 500
+
+
+def _get_story(username, media_id):
+    try:
+        session = get_insta_session()
+
+        user_resp = session.get(
+            f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}",
+            timeout=15
+        )
+
+        if user_resp.status_code == 401:
+            return jsonify({
+                "status": False,
+                "owner": "Xeon Vro",
+                "platform": "instagram",
+                "message": "Cookies expired. Please update cookies.txt."
+            }), 401
+
+        user_data = user_resp.json()
+        user_id = user_data["data"]["user"]["id"]
+
+        stories_resp = session.get(
+            f"https://www.instagram.com/api/v1/feed/reels_media/?reel_ids={user_id}",
+            timeout=15
+        )
+
+        stories_data = stories_resp.json()
+        reels = stories_data.get("reels_media", [])
+
+        if not reels:
+            return jsonify({
+                "status": False,
+                "owner": "Xeon Vro",
+                "platform": "instagram",
+                "message": "No active stories found for this user."
+            }), 404
+
+        items = reels[0].get("items", [])
+        target = next((i for i in items if str(i.get("pk")) == str(media_id)), None)
+
+        if target is None:
+            results = []
+            for item in items:
+                if "video_versions" in item:
+                    results.append({
+                        "type": "video",
+                        "media": item["video_versions"][0]["url"],
+                        "media_id": str(item.get("pk"))
+                    })
+                else:
+                    candidates = item.get("image_versions2", {}).get("candidates", [])
+                    if candidates:
+                        results.append({
+                            "type": "image",
+                            "media": candidates[0]["url"],
+                            "media_id": str(item.get("pk"))
+                        })
+
+            return jsonify({
+                "status": True,
+                "owner": "Xeon Vro",
+                "platform": "instagram",
+                "note": "Specific story not found, returning all active stories",
+                "stories": results
+            })
+
+        if "video_versions" in target:
+            return jsonify({
+                "status": True,
+                "owner": "Xeon Vro",
+                "platform": "instagram",
+                "type": "video",
+                "media": target["video_versions"][0]["url"]
+            })
+        else:
+            candidates = target.get("image_versions2", {}).get("candidates", [])
+            return jsonify({
+                "status": True,
+                "owner": "Xeon Vro",
+                "platform": "instagram",
+                "type": "image",
+                "media": candidates[0]["url"]
+            })
+
+    except Exception as e:
+        return jsonify({
+            "status": False,
+            "owner": "Xeon Vro",
+            "platform": "instagram",
+            "error": str(e)
+        }), 500
 
 
 @app.after_request
@@ -76,6 +215,12 @@ def insta():
     try:
         url = url.split("?")[0].rstrip("/")
 
+        # Story
+        story_match = re.search(r"stories/([^/?]+)/(\d+)", url)
+        if story_match:
+            return _get_story(story_match.group(1), story_match.group(2))
+
+        # Reel / Post / TV
         match = re.search(r"(?:reel|p|tv)/([^/?]+)", url)
         if not match:
             return jsonify({
@@ -87,15 +232,14 @@ def insta():
         shortcode = match.group(1)
         session = get_insta_session()
 
-        # Use Instagram's GQL API — works with valid session cookies
+        # Try v1 API first
         api_url = (
             f"https://www.instagram.com/api/v1/media/"
             f"{shortcode_to_media_id(shortcode)}/info/"
         )
-
         resp = session.get(api_url, timeout=15)
 
-        # Fallback to /graphql if media ID conversion fails
+        # Fallback to GraphQL
         if resp.status_code != 200:
             gql_url = (
                 "https://www.instagram.com/graphql/query/"
@@ -113,12 +257,11 @@ def insta():
             }), 401
 
         if resp.status_code != 200:
-            # Last fallback: scrape the page HTML directly
-            return _scrape_insta_html(session, url, shortcode)
+            return _scrape_insta_html(session, url)
 
         data = resp.json()
 
-        # Parse GQL response
+        # Parse GraphQL response
         try:
             media = data["data"]["shortcode_media"]
             if media.get("is_video"):
@@ -140,7 +283,7 @@ def insta():
         except (KeyError, TypeError):
             pass
 
-        # Parse /api/v1/media/info/ response
+        # Parse v1 API response
         try:
             item = data["items"][0]
             if "video_versions" in item:
@@ -164,60 +307,7 @@ def insta():
         except (KeyError, IndexError, TypeError):
             pass
 
-        return _scrape_insta_html(session, url, shortcode)
-
-    except Exception as e:
-        return jsonify({
-            "status": False,
-            "owner": "Xeon Vro",
-            "platform": "instagram",
-            "error": str(e)
-        }), 500
-
-
-def shortcode_to_media_id(shortcode):
-    """Convert Instagram shortcode to numeric media ID."""
-    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-    media_id = 0
-    for char in shortcode:
-        media_id = media_id * 64 + alphabet.index(char)
-    return media_id
-
-
-def _scrape_insta_html(session, url, shortcode):
-    """Fallback: fetch page HTML and regex out media URLs."""
-    try:
-        resp = session.get(url, timeout=15)
-        html = resp.text
-
-        # Video
-        video = re.search(r'"video_url"\s*:\s*"([^"]+)"', html)
-        if video:
-            return jsonify({
-                "status": True,
-                "owner": "Xeon Vro",
-                "platform": "instagram",
-                "type": "video",
-                "media": video.group(1).replace("\\u0026", "&")
-            })
-
-        # Image
-        image = re.search(r'"display_url"\s*:\s*"([^"]+)"', html)
-        if image:
-            return jsonify({
-                "status": True,
-                "owner": "Xeon Vro",
-                "platform": "instagram",
-                "type": "image",
-                "media": image.group(1).replace("\\u0026", "&")
-            })
-
-        return jsonify({
-            "status": False,
-            "owner": "Xeon Vro",
-            "platform": "instagram",
-            "message": "Could not extract media. Cookies may be expired."
-        }), 500
+        return _scrape_insta_html(session, url)
 
     except Exception as e:
         return jsonify({
@@ -229,7 +319,7 @@ def _scrape_insta_html(session, url, shortcode):
 
 
 # =========================
-# Facebook Downloader  ← UNCHANGED
+# Facebook Downloader
 # =========================
 @app.route("/fb")
 def fb():
@@ -251,7 +341,7 @@ def fb():
 
 
 # =========================
-# Pinterest Downloader  ← UNCHANGED
+# Pinterest Downloader
 # =========================
 @app.route("/pin")
 def pin():
