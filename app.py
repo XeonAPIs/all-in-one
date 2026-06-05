@@ -1,182 +1,22 @@
 from flask import Flask, request, jsonify
 import requests
 import re
-import os
 from urllib.parse import urlparse
-from http.cookiejar import MozillaCookieJar
 
 app = Flask(__name__)
 
 FB_API = "https://serverless-tooly-gateway-6n4h522y.ue.gateway.dev/facebook/video"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www.instagram.com/",
-    "x-ig-app-id": "936619743392459",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 }
 
 
-def get_insta_session():
-    session = requests.Session()
-    session.headers.update(HEADERS)
-    cookie_file = "cookies.txt"
-    if os.path.exists(cookie_file):
-        jar = MozillaCookieJar(cookie_file)
-        jar.load(ignore_discard=True, ignore_expires=True)
-        session.cookies = jar
-    return session
-
-
-def shortcode_to_media_id(shortcode):
-    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-    media_id = 0
-    for char in shortcode:
-        media_id = media_id * 64 + alphabet.index(char)
-    return media_id
-
-
-def _scrape_insta_html(session, url):
-    try:
-        resp = session.get(url, timeout=15)
-        html = resp.text
-
-        video = re.search(r'"video_url"\s*:\s*"([^"]+)"', html)
-        if video:
-            return jsonify({
-                "status": True,
-                "owner": "Xeon Vro",
-                "platform": "instagram",
-                "type": "video",
-                "media": video.group(1).replace("\\u0026", "&")
-            })
-
-        image = re.search(r'"display_url"\s*:\s*"([^"]+)"', html)
-        if image:
-            return jsonify({
-                "status": True,
-                "owner": "Xeon Vro",
-                "platform": "instagram",
-                "type": "image",
-                "media": image.group(1).replace("\\u0026", "&")
-            })
-
-        return jsonify({
-            "status": False,
-            "owner": "Xeon Vro",
-            "platform": "instagram",
-            "message": "Could not extract media. Cookies may be expired."
-        }), 500
-
-    except Exception as e:
-        return jsonify({
-            "status": False,
-            "owner": "Xeon Vro",
-            "platform": "instagram",
-            "error": str(e)
-        }), 500
-
-
-def _get_story(username, media_id):
-    try:
-        session = get_insta_session()
-
-        user_resp = session.get(
-            f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}",
-            timeout=15
-        )
-
-        if user_resp.status_code == 401:
-            return jsonify({
-                "status": False,
-                "owner": "Xeon Vro",
-                "platform": "instagram",
-                "message": "Cookies expired. Please update cookies.txt."
-            }), 401
-
-        user_data = user_resp.json()
-        user_id = user_data["data"]["user"]["id"]
-
-        stories_resp = session.get(
-            f"https://www.instagram.com/api/v1/feed/reels_media/?reel_ids={user_id}",
-            timeout=15
-        )
-
-        stories_data = stories_resp.json()
-        reels = stories_data.get("reels_media", [])
-
-        if not reels:
-            return jsonify({
-                "status": False,
-                "owner": "Xeon Vro",
-                "platform": "instagram",
-                "message": "No active stories found for this user."
-            }), 404
-
-        items = reels[0].get("items", [])
-        target = next((i for i in items if str(i.get("pk")) == str(media_id)), None)
-
-        if target is None:
-            results = []
-            for item in items:
-                if "video_versions" in item:
-                    results.append({
-                        "type": "video",
-                        "media": item["video_versions"][0]["url"],
-                        "media_id": str(item.get("pk"))
-                    })
-                else:
-                    candidates = item.get("image_versions2", {}).get("candidates", [])
-                    if candidates:
-                        results.append({
-                            "type": "image",
-                            "media": candidates[0]["url"],
-                            "media_id": str(item.get("pk"))
-                        })
-
-            return jsonify({
-                "status": True,
-                "owner": "Xeon Vro",
-                "platform": "instagram",
-                "note": "Specific story not found, returning all active stories",
-                "stories": results
-            })
-
-        if "video_versions" in target:
-            return jsonify({
-                "status": True,
-                "owner": "Xeon Vro",
-                "platform": "instagram",
-                "type": "video",
-                "media": target["video_versions"][0]["url"]
-            })
-        else:
-            candidates = target.get("image_versions2", {}).get("candidates", [])
-            return jsonify({
-                "status": True,
-                "owner": "Xeon Vro",
-                "platform": "instagram",
-                "type": "image",
-                "media": candidates[0]["url"]
-            })
-
-    except Exception as e:
-        return jsonify({
-            "status": False,
-            "owner": "Xeon Vro",
-            "platform": "instagram",
-            "error": str(e)
-        }), 500
-
-
 @app.after_request
-def add_cors_headers(response):
+def cors(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "*"
     return response
 
 
@@ -193,14 +33,10 @@ def home():
     })
 
 
-@app.route("/favicon.ico")
-def favicon():
-    return "", 204
-
-
 # =========================
-# Instagram Downloader
+# Instagram (Redvid)
 # =========================
+
 @app.route("/insta")
 def insta():
     url = request.args.get("url")
@@ -208,164 +44,183 @@ def insta():
     if not url:
         return jsonify({
             "status": False,
-            "owner": "Xeon Vro",
-            "message": "No URL provided"
+            "platform": "instagram",
+            "message": "Missing Instagram URL"
         }), 400
 
     try:
-        url = url.split("?")[0].rstrip("/")
-
-        # Story
-        story_match = re.search(r"stories/([^/?]+)/(\d+)", url)
-        if story_match:
-            return _get_story(story_match.group(1), story_match.group(2))
-
-        # Reel / Post / TV
-        match = re.search(r"(?:reel|p|tv)/([^/?]+)", url)
-        if not match:
-            return jsonify({
-                "status": False,
-                "owner": "Xeon Vro",
-                "message": "Invalid Instagram URL"
-            }), 400
-
-        shortcode = match.group(1)
-        session = get_insta_session()
-
-        # Try v1 API first
-        api_url = (
-            f"https://www.instagram.com/api/v1/media/"
-            f"{shortcode_to_media_id(shortcode)}/info/"
+        response = requests.post(
+            "https://redvid.io/fetch",
+            data={
+                "url": url,
+                "lang": "en"
+            },
+            headers={
+                **HEADERS,
+                "Origin": "https://redvid.io",
+                "Referer": "https://redvid.io/",
+                "X-Requested-With": "XMLHttpRequest"
+            },
+            timeout=30
         )
-        resp = session.get(api_url, timeout=15)
 
-        # Fallback to GraphQL
-        if resp.status_code != 200:
-            gql_url = (
-                "https://www.instagram.com/graphql/query/"
-                f"?query_hash=b3055c01b4b222b8a47dc12b090e4e64"
-                f"&variables=%7B%22shortcode%22%3A%22{shortcode}%22%7D"
-            )
-            resp = session.get(gql_url, timeout=15)
+        response.raise_for_status()
 
-        if resp.status_code == 401:
+        data = response.json()
+
+        if not data.get("success"):
             return jsonify({
                 "status": False,
+                "platform": "instagram",
+                "message": "Failed to fetch media"
+            }), 500
+
+        view = data.get("view", "")
+
+        video_links = re.findall(
+            r'href="([^"]+\.mp4[^"]*)"',
+            view,
+            re.I
+        )
+
+        image_links = re.findall(
+            r'https://[^"\']+\.(?:jpg|jpeg|png|webp)',
+            view,
+            re.I
+        )
+
+        if video_links:
+            return jsonify({
+                "status": True,
                 "owner": "Xeon Vro",
                 "platform": "instagram",
-                "message": "Cookies expired or invalid. Please update cookies.txt."
-            }), 401
+                "type": "video",
+                "media": video_links[0]
+            })
 
-        if resp.status_code != 200:
-            return _scrape_insta_html(session, url)
+        if image_links:
+            return jsonify({
+                "status": True,
+                "owner": "Xeon Vro",
+                "platform": "instagram",
+                "type": "image",
+                "media": image_links[0]
+            })
 
-        data = resp.json()
-
-        # Parse GraphQL response
-        try:
-            media = data["data"]["shortcode_media"]
-            if media.get("is_video"):
-                return jsonify({
-                    "status": True,
-                    "owner": "Xeon Vro",
-                    "platform": "instagram",
-                    "type": "video",
-                    "media": media["video_url"]
-                })
-            else:
-                return jsonify({
-                    "status": True,
-                    "owner": "Xeon Vro",
-                    "platform": "instagram",
-                    "type": "image",
-                    "media": media["display_url"]
-                })
-        except (KeyError, TypeError):
-            pass
-
-        # Parse v1 API response
-        try:
-            item = data["items"][0]
-            if "video_versions" in item:
-                return jsonify({
-                    "status": True,
-                    "owner": "Xeon Vro",
-                    "platform": "instagram",
-                    "type": "video",
-                    "media": item["video_versions"][0]["url"]
-                })
-            else:
-                candidates = item.get("image_versions2", {}).get("candidates", [])
-                if candidates:
-                    return jsonify({
-                        "status": True,
-                        "owner": "Xeon Vro",
-                        "platform": "instagram",
-                        "type": "image",
-                        "media": candidates[0]["url"]
-                    })
-        except (KeyError, IndexError, TypeError):
-            pass
-
-        return _scrape_insta_html(session, url)
+        return jsonify({
+            "status": True,
+            "platform": "instagram",
+            "raw": data
+        })
 
     except Exception as e:
         return jsonify({
             "status": False,
-            "owner": "Xeon Vro",
             "platform": "instagram",
             "error": str(e)
         }), 500
 
 
 # =========================
-# Facebook Downloader
+# Facebook
 # =========================
+
 @app.route("/fb")
 def fb():
     url = request.args.get("url")
+
     if not url:
-        return jsonify({"status": False, "message": "Missing Facebook URL"}), 400
+        return jsonify({
+            "status": False,
+            "message": "Missing Facebook URL"
+        }), 400
+
     try:
-        response = requests.get(FB_API, params={"url": url}, timeout=30)
+        response = requests.get(
+            FB_API,
+            params={"url": url},
+            timeout=30
+        )
+
         response.raise_for_status()
+
         data = response.json()
+
         return jsonify({
             "status": data.get("success", False),
             "platform": "facebook",
             "title": data.get("title"),
             "videos": data.get("videos", {})
         })
+
     except Exception as e:
-        return jsonify({"status": False, "platform": "facebook", "error": str(e)}), 500
+        return jsonify({
+            "status": False,
+            "platform": "facebook",
+            "error": str(e)
+        }), 500
 
 
 # =========================
-# Pinterest Downloader
+# Pinterest
 # =========================
+
 @app.route("/pin")
 def pin():
     url = request.args.get("url")
+
     if not url:
-        return jsonify({"status": False, "message": "Missing Pinterest URL"}), 400
+        return jsonify({
+            "status": False,
+            "message": "Missing Pinterest URL"
+        }), 400
+
     try:
         parsed = urlparse(url)
-        if not any(domain in parsed.netloc for domain in ["pinterest.com", "pin.it"]):
-            return jsonify({"status": False, "message": "Invalid Pinterest URL"}), 400
-        response = requests.get(url, headers=HEADERS, timeout=20)
+
+        if not any(
+            domain in parsed.netloc
+            for domain in ["pinterest.com", "pin.it"]
+        ):
+            return jsonify({
+                "status": False,
+                "message": "Invalid Pinterest URL"
+            }), 400
+
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            timeout=20
+        )
+
         response.raise_for_status()
+
         html = response.text
+
         images = list(set(re.findall(
-            r"https://i\.pinimg\.com/[^\s'\"<>]+?\.(?:jpg|jpeg|png|webp)", html
+            r"https://i\.pinimg\.com/[^\s'\"<>]+?\.(?:jpg|jpeg|png|webp)",
+            html
         )))
+
         videos = list(set(re.findall(
-            r"https://(?:v|v1|i)\.pinimg\.com/[^\s'\"<>]+?\.mp4", html
+            r"https://(?:v|v1|i)\.pinimg\.com/[^\s'\"<>]+?\.mp4",
+            html
         )))
-        return jsonify({"status": True, "platform": "pinterest", "images": images, "videos": videos})
+
+        return jsonify({
+            "status": True,
+            "platform": "pinterest",
+            "images": images,
+            "videos": videos
+        })
+
     except Exception as e:
-        return jsonify({"status": False, "platform": "pinterest", "error": str(e)}), 500
+        return jsonify({
+            "status": False,
+            "platform": "pinterest",
+            "error": str(e)
+        }), 500
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=8000)
