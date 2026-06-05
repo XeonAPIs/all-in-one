@@ -1,6 +1,8 @@
 from flask import Flask, request, jsonify
 import requests
+import instaloader
 import re
+import os
 from urllib.parse import urlparse
 
 app = Flask(__name__)
@@ -8,15 +10,24 @@ app = Flask(__name__)
 FB_API = "https://serverless-tooly-gateway-6n4h522y.ue.gateway.dev/facebook/video"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0"
 }
+
+# Instagram Loader
+L = instaloader.Instaloader(
+    download_pictures=False,
+    download_videos=False,
+    download_video_thumbnails=False,
+    save_metadata=False,
+    compress_json=False
+)
 
 
 @app.after_request
-def cors(response):
+def add_cors_headers(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
     return response
 
 
@@ -25,8 +36,7 @@ def home():
     return jsonify({
         "status": True,
         "owner": "Xeon Vro",
-        "type": "social-media-downloader-api",
-        "endpoints": {
+        "apis": {
             "instagram": "/insta?url=",
             "facebook": "/fb?url=",
             "pinterest": "/pin?url="
@@ -34,104 +44,100 @@ def home():
     })
 
 
-# =========================
-# Instagram (Redvid)
-# =========================
+@app.route("/favicon.ico")
+def favicon():
+    return "", 204
 
+
+# =========================
+# Instagram Downloader
+# =========================
 @app.route("/insta")
 def insta():
+
     url = request.args.get("url")
 
     if not url:
         return jsonify({
             "status": False,
             "owner": "Xeon Vro",
-            "type": "instagram"
+            "message": "No URL provided"
         }), 400
 
     try:
-        response = requests.post(
-            "https://redvid.io/fetch",
-            data={"url": url, "lang": "en"},
-            headers={
-                **HEADERS,
-                "Origin": "https://redvid.io",
-                "Referer": "https://redvid.io/",
-                "X-Requested-With": "XMLHttpRequest"
-            },
-            timeout=30
+        url = url.split("?")[0]
+
+        match = re.search(
+            r"(?:reel|p|tv)/([^/?]+)",
+            url
         )
 
-        response.raise_for_status()
-        data = response.json()
-
-        if not data.get("success"):
+        if not match:
             return jsonify({
                 "status": False,
                 "owner": "Xeon Vro",
-                "type": "instagram"
-            }), 500
+                "message": "Invalid Instagram URL"
+            }), 400
 
-        view = data.get("view", "")
+        shortcode = match.group(1)
 
-        video_links = re.findall(r'href="([^"]+\.mp4[^"]*)"', view, re.I)
-        image_links = re.findall(r'https://[^"\']+\.(?:jpg|jpeg|png|webp)', view, re.I)
+        post = instaloader.Post.from_shortcode(
+            L.context,
+            shortcode
+        )
 
-        if video_links:
-            return jsonify({
-                "status": True,
-                "owner": "Xeon Vro",
-                "type": "instagram",
-                "media": video_links[0]
-            })
-
-        if image_links:
-            return jsonify({
-                "status": True,
-                "owner": "Xeon Vro",
-                "type": "instagram",
-                "media": image_links[0]
-            })
+        if post.is_video:
+            media = post.video_url
+            media_type = "video"
+        else:
+            media = post.url
+            media_type = "image"
 
         return jsonify({
             "status": True,
             "owner": "Xeon Vro",
-            "type": "instagram",
-            "raw": data
+            "platform": "instagram",
+            "type": media_type,
+            "media": media
         })
 
     except Exception as e:
         return jsonify({
             "status": False,
             "owner": "Xeon Vro",
-            "type": "instagram"
+            "platform": "instagram",
+            "error": str(e)
         }), 500
 
 
 # =========================
-# Facebook
+# Facebook Downloader
 # =========================
-
 @app.route("/fb")
 def fb():
+
     url = request.args.get("url")
 
     if not url:
         return jsonify({
             "status": False,
-            "owner": "Xeon Vro",
-            "type": "facebook"
+            "message": "Missing Facebook URL"
         }), 400
 
     try:
-        response = requests.get(FB_API, params={"url": url}, timeout=30)
+        response = requests.get(
+            FB_API,
+            params={"url": url},
+            timeout=30
+        )
+
         response.raise_for_status()
+
         data = response.json()
 
         return jsonify({
             "status": data.get("success", False),
-            "owner": "Xeon Vro",
-            "type": "facebook",
+            "platform": "facebook",
             "title": data.get("title"),
             "videos": data.get("videos", {})
         })
@@ -139,24 +145,23 @@ def fb():
     except Exception as e:
         return jsonify({
             "status": False,
-            "owner": "Xeon Vro",
-            "type": "facebook"
+            "platform": "facebook",
+            "error": str(e)
         }), 500
 
 
 # =========================
-# Pinterest
+# Pinterest Downloader
 # =========================
-
 @app.route("/pin")
 def pin():
+
     url = request.args.get("url")
 
     if not url:
         return jsonify({
             "status": False,
-            "owner": "Xeon Vro",
-            "type": "pinterest"
+            "message": "Missing Pinterest URL"
         }), 400
 
     try:
@@ -165,26 +170,32 @@ def pin():
         if not any(domain in parsed.netloc for domain in ["pinterest.com", "pin.it"]):
             return jsonify({
                 "status": False,
-                "owner": "Xeon Vro",
-                "type": "pinterest"
+                "message": "Invalid Pinterest URL"
             }), 400
 
-        response = requests.get(url, headers=HEADERS, timeout=20)
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            timeout=20
+        )
+
         response.raise_for_status()
+
         html = response.text
 
         images = list(set(re.findall(
-            r"https://i\.pinimg\.com/[^\s'\"<>]+?\.(?:jpg|jpeg|png|webp)", html
+            r"https://i\.pinimg\.com/[^\s'\"<>]+?\.(?:jpg|jpeg|png|webp)",
+            html
         )))
 
         videos = list(set(re.findall(
-            r"https://(?:v|v1|i)\.pinimg\.com/[^\s'\"<>]+?\.mp4", html
+            r"https://(?:v|v1|i)\.pinimg\.com/[^\s'\"<>]+?\.mp4",
+            html
         )))
 
         return jsonify({
             "status": True,
-            "owner": "Xeon Vro",
-            "type": "pinterest",
+            "platform": "pinterest",
             "images": images,
             "videos": videos
         })
@@ -192,10 +203,11 @@ def pin():
     except Exception as e:
         return jsonify({
             "status": False,
-            "owner": "Xeon Vro",
-            "type": "pinterest"
+            "platform": "pinterest",
+            "error": str(e)
         }), 500
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    app.run(host="0.0.0.0", port=port)
