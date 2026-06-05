@@ -4,40 +4,33 @@ import re
 import os
 import json
 from urllib.parse import urlparse
-from playwright.sync_api import sync_playwright
+from http.cookiejar import MozillaCookieJar
 
 app = Flask(__name__)
 
 FB_API = "https://serverless-tooly-gateway-6n4h522y.ue.gateway.dev/facebook/video"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.instagram.com/",
+    "x-ig-app-id": "936619743392459",
 }
 
 
-def load_cookies_from_file(path="cookies.txt"):
-    """Parse Netscape-format cookies.txt into Playwright cookie dicts."""
-    cookies = []
-    if not os.path.exists(path):
-        return cookies
-    with open(path, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split("\t")
-            if len(parts) < 7:
-                continue
-            domain, _, path_, secure, expires, name, value = parts[:7]
-            cookies.append({
-                "name": name,
-                "value": value,
-                "domain": domain.lstrip("."),
-                "path": path_,
-                "secure": secure.upper() == "TRUE",
-                "sameSite": "Lax"
-            })
-    return cookies
+def get_insta_session():
+    """Build a requests session loaded with cookies.txt."""
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    cookie_file = "cookies.txt"
+    if os.path.exists(cookie_file):
+        jar = MozillaCookieJar(cookie_file)
+        jar.load(ignore_discard=True, ignore_expires=True)
+        session.cookies = jar
+    return session
 
 
 @app.after_request
@@ -81,7 +74,7 @@ def insta():
         }), 400
 
     try:
-        url = url.split("?")[0]
+        url = url.split("?")[0].rstrip("/")
 
         match = re.search(r"(?:reel|p|tv)/([^/?]+)", url)
         if not match:
@@ -91,75 +84,139 @@ def insta():
                 "message": "Invalid Instagram URL"
             }), 400
 
-        cookies = load_cookies_from_file("cookies.txt")
+        shortcode = match.group(1)
+        session = get_insta_session()
 
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                           "AppleWebKit/537.36 (KHTML, like Gecko) "
-                           "Chrome/124.0.0.0 Safari/537.36"
+        # Use Instagram's GQL API — works with valid session cookies
+        api_url = (
+            f"https://www.instagram.com/api/v1/media/"
+            f"{shortcode_to_media_id(shortcode)}/info/"
+        )
+
+        resp = session.get(api_url, timeout=15)
+
+        # Fallback to /graphql if media ID conversion fails
+        if resp.status_code != 200:
+            gql_url = (
+                "https://www.instagram.com/graphql/query/"
+                f"?query_hash=b3055c01b4b222b8a47dc12b090e4e64"
+                f"&variables=%7B%22shortcode%22%3A%22{shortcode}%22%7D"
             )
+            resp = session.get(gql_url, timeout=15)
 
-            if cookies:
-                context.add_cookies([
-                    {**c, "domain": "instagram.com"} for c in cookies
-                ])
+        if resp.status_code == 401:
+            return jsonify({
+                "status": False,
+                "owner": "Xeon Vro",
+                "platform": "instagram",
+                "message": "Cookies expired or invalid. Please update cookies.txt."
+            }), 401
 
-            page = context.new_page()
+        if resp.status_code != 200:
+            # Last fallback: scrape the page HTML directly
+            return _scrape_insta_html(session, url, shortcode)
 
-            media_urls = {"video": [], "image": []}
+        data = resp.json()
 
-            def handle_response(response):
-                ct = response.headers.get("content-type", "")
-                resp_url = response.url
-                if "video" in ct or resp_url.endswith(".mp4"):
-                    media_urls["video"].append(resp_url)
-                elif "instagram.com" in resp_url and re.search(
-                    r"\.(jpg|jpeg|png|webp)", resp_url
-                ):
-                    media_urls["image"].append(resp_url)
+        # Parse GQL response
+        try:
+            media = data["data"]["shortcode_media"]
+            if media.get("is_video"):
+                return jsonify({
+                    "status": True,
+                    "owner": "Xeon Vro",
+                    "platform": "instagram",
+                    "type": "video",
+                    "media": media["video_url"]
+                })
+            else:
+                return jsonify({
+                    "status": True,
+                    "owner": "Xeon Vro",
+                    "platform": "instagram",
+                    "type": "image",
+                    "media": media["display_url"]
+                })
+        except (KeyError, TypeError):
+            pass
 
-            page.on("response", handle_response)
-            page.goto(url, wait_until="networkidle", timeout=30000)
-            page.wait_for_timeout(3000)
+        # Parse /api/v1/media/info/ response
+        try:
+            item = data["items"][0]
+            if "video_versions" in item:
+                return jsonify({
+                    "status": True,
+                    "owner": "Xeon Vro",
+                    "platform": "instagram",
+                    "type": "video",
+                    "media": item["video_versions"][0]["url"]
+                })
+            else:
+                candidates = item.get("image_versions2", {}).get("candidates", [])
+                if candidates:
+                    return jsonify({
+                        "status": True,
+                        "owner": "Xeon Vro",
+                        "platform": "instagram",
+                        "type": "image",
+                        "media": candidates[0]["url"]
+                    })
+        except (KeyError, IndexError, TypeError):
+            pass
 
-            # Also scrape HTML for media links
-            html = page.content()
+        return _scrape_insta_html(session, url, shortcode)
 
-            browser.close()
+    except Exception as e:
+        return jsonify({
+            "status": False,
+            "owner": "Xeon Vro",
+            "platform": "instagram",
+            "error": str(e)
+        }), 500
 
-        # Try video first, then image
-        if media_urls["video"]:
+
+def shortcode_to_media_id(shortcode):
+    """Convert Instagram shortcode to numeric media ID."""
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    media_id = 0
+    for char in shortcode:
+        media_id = media_id * 64 + alphabet.index(char)
+    return media_id
+
+
+def _scrape_insta_html(session, url, shortcode):
+    """Fallback: fetch page HTML and regex out media URLs."""
+    try:
+        resp = session.get(url, timeout=15)
+        html = resp.text
+
+        # Video
+        video = re.search(r'"video_url"\s*:\s*"([^"]+)"', html)
+        if video:
             return jsonify({
                 "status": True,
                 "owner": "Xeon Vro",
                 "platform": "instagram",
                 "type": "video",
-                "media": media_urls["video"][0]
+                "media": video.group(1).replace("\\u0026", "&")
             })
 
-        # Fallback: parse HTML for image
-        images = re.findall(
-            r'https://[^"\'<>\s]+\.(?:jpg|jpeg|png|webp)[^"\'<>\s]*',
-            html
-        )
-        images = [i for i in images if "instagram" in i or "cdninstagram" in i]
-
-        if images:
+        # Image
+        image = re.search(r'"display_url"\s*:\s*"([^"]+)"', html)
+        if image:
             return jsonify({
                 "status": True,
                 "owner": "Xeon Vro",
                 "platform": "instagram",
                 "type": "image",
-                "media": images[0]
+                "media": image.group(1).replace("\\u0026", "&")
             })
 
         return jsonify({
             "status": False,
             "owner": "Xeon Vro",
             "platform": "instagram",
-            "message": "Could not extract media. Check cookies or URL."
+            "message": "Could not extract media. Cookies may be expired."
         }), 500
 
     except Exception as e:
