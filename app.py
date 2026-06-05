@@ -44,8 +44,8 @@ def insta():
     if not url:
         return jsonify({
             "status": False,
-            "platform": "instagram",
-            "message": "Missing Instagram URL"
+            "owner": "Xeon Vro",
+            "message": "No URL provided"
         }), 400
 
     try:
@@ -56,7 +56,7 @@ def insta():
                 "lang": "en"
             },
             headers={
-                **HEADERS,
+                "User-Agent": HEADERS["User-Agent"],
                 "Origin": "https://redvid.io",
                 "Referer": "https://redvid.io/",
                 "X-Requested-With": "XMLHttpRequest"
@@ -71,52 +71,43 @@ def insta():
         if not data.get("success"):
             return jsonify({
                 "status": False,
-                "platform": "instagram",
-                "message": "Failed to fetch media"
+                "owner": "Xeon Vro"
             }), 500
 
         view = data.get("view", "")
 
-        video_links = re.findall(
-            r'href="([^"]+\.mp4[^"]*)"',
+        download_match = re.search(
+            r'href="([^"]+)"\s+class="download-video"',
             view,
             re.I
         )
 
-        image_links = re.findall(
-            r'https://[^"\']+\.(?:jpg|jpeg|png|webp)',
+        thumbnail_match = re.search(
+            r'<img[^>]+src="([^"]+thumbnail-proxy[^"]+)"',
             view,
             re.I
         )
 
-        if video_links:
+        if download_match:
             return jsonify({
                 "status": True,
                 "owner": "Xeon Vro",
                 "platform": "instagram",
                 "type": "video",
-                "media": video_links[0]
-            })
-
-        if image_links:
-            return jsonify({
-                "status": True,
-                "owner": "Xeon Vro",
-                "platform": "instagram",
-                "type": "image",
-                "media": image_links[0]
+                "media": download_match.group(1),
+                "thumbnail": thumbnail_match.group(1) if thumbnail_match else None
             })
 
         return jsonify({
-            "status": True,
-            "platform": "instagram",
-            "raw": data
-        })
+            "status": False,
+            "owner": "Xeon Vro",
+            "message": "Media not found"
+        }), 404
 
     except Exception as e:
         return jsonify({
             "status": False,
-            "platform": "instagram",
+            "owner": "Xeon Vro",
             "error": str(e)
         }), 500
 
