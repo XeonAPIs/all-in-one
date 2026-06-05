@@ -1,27 +1,35 @@
 from flask import Flask, request, jsonify
-import requests
 import instaloader
-import re
 import os
-from urllib.parse import urlparse
+import re
 
 app = Flask(__name__)
 
-FB_API = "https://serverless-tooly-gateway-6n4h522y.ue.gateway.dev/facebook/video"
+# -------------------------
+# Instaloader Setup
+# -------------------------
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0"
-}
-
-# Instagram Loader
 L = instaloader.Instaloader(
     download_pictures=False,
     download_videos=False,
     download_video_thumbnails=False,
     save_metadata=False,
-    compress_json=False
+    compress_json=False,
 )
 
+IG_USERNAME = os.getenv("IG_USERNAME")
+IG_PASSWORD = os.getenv("IG_PASSWORD")
+
+if IG_USERNAME and IG_PASSWORD:
+    try:
+        L.login(IG_USERNAME, IG_PASSWORD)
+        print("Instagram login successful")
+    except Exception as e:
+        print(f"Instagram login failed: {e}")
+
+# -------------------------
+# CORS
+# -------------------------
 
 @app.after_request
 def add_cors_headers(response):
@@ -30,28 +38,22 @@ def add_cors_headers(response):
     response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
     return response
 
+# -------------------------
+# Home
+# -------------------------
 
 @app.route("/")
 def home():
     return jsonify({
         "status": True,
-        "owner": "Xeon Vro",
-        "apis": {
-            "instagram": "/insta?url=",
-            "facebook": "/fb?url=",
-            "pinterest": "/pin?url="
-        }
+        "platform": "instagram",
+        "endpoint": "/insta?url="
     })
 
-
-@app.route("/favicon.ico")
-def favicon():
-    return "", 204
-
-
-# =========================
+# -------------------------
 # Instagram Downloader
-# =========================
+# -------------------------
+
 @app.route("/insta")
 def insta():
 
@@ -60,22 +62,21 @@ def insta():
     if not url:
         return jsonify({
             "status": False,
-            "owner": "Xeon Vro",
             "message": "No URL provided"
         }), 400
 
     try:
+
         url = url.split("?")[0]
 
         match = re.search(
-            r"(?:reel|p|tv)/([^/?]+)",
+            r"/(?:reel|p|tv)/([^/?]+)/?",
             url
         )
 
         if not match:
             return jsonify({
                 "status": False,
-                "owner": "Xeon Vro",
                 "message": "Invalid Instagram URL"
             }), 400
 
@@ -86,127 +87,48 @@ def insta():
             shortcode
         )
 
-        if post.is_video:
-            media = post.video_url
-            media_type = "video"
+        media = []
+
+        # Carousel posts
+        if post.typename == "GraphSidecar":
+
+            for node in post.get_sidecar_nodes():
+
+                media.append({
+                    "type": "video" if node.is_video else "image",
+                    "url": node.video_url if node.is_video else node.display_url
+                })
+
+        # Single post
         else:
-            media = post.url
-            media_type = "image"
+
+            media.append({
+                "type": "video" if post.is_video else "image",
+                "url": post.video_url if post.is_video else post.url
+            })
 
         return jsonify({
             "status": True,
-            "owner": "Xeon Vro",
             "platform": "instagram",
-            "type": media_type,
+            "shortcode": shortcode,
+            "username": post.owner_username,
+            "caption": post.caption or "",
+            "likes": post.likes,
+            "comments": post.comments,
             "media": media
         })
 
     except Exception as e:
+
         return jsonify({
             "status": False,
-            "owner": "Xeon Vro",
-            "platform": "instagram",
+            "error_type": type(e).__name__,
             "error": str(e)
         }), 500
 
-
-# =========================
-# Facebook Downloader
-# =========================
-@app.route("/fb")
-def fb():
-
-    url = request.args.get("url")
-
-    if not url:
-        return jsonify({
-            "status": False,
-            "message": "Missing Facebook URL"
-        }), 400
-
-    try:
-        response = requests.get(
-            FB_API,
-            params={"url": url},
-            timeout=30
-        )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        return jsonify({
-            "status": data.get("success", False),
-            "platform": "facebook",
-            "title": data.get("title"),
-            "videos": data.get("videos", {})
-        })
-
-    except Exception as e:
-        return jsonify({
-            "status": False,
-            "platform": "facebook",
-            "error": str(e)
-        }), 500
-
-
-# =========================
-# Pinterest Downloader
-# =========================
-@app.route("/pin")
-def pin():
-
-    url = request.args.get("url")
-
-    if not url:
-        return jsonify({
-            "status": False,
-            "message": "Missing Pinterest URL"
-        }), 400
-
-    try:
-        parsed = urlparse(url)
-
-        if not any(domain in parsed.netloc for domain in ["pinterest.com", "pin.it"]):
-            return jsonify({
-                "status": False,
-                "message": "Invalid Pinterest URL"
-            }), 400
-
-        response = requests.get(
-            url,
-            headers=HEADERS,
-            timeout=20
-        )
-
-        response.raise_for_status()
-
-        html = response.text
-
-        images = list(set(re.findall(
-            r"https://i\.pinimg\.com/[^\s'\"<>]+?\.(?:jpg|jpeg|png|webp)",
-            html
-        )))
-
-        videos = list(set(re.findall(
-            r"https://(?:v|v1|i)\.pinimg\.com/[^\s'\"<>]+?\.mp4",
-            html
-        )))
-
-        return jsonify({
-            "status": True,
-            "platform": "pinterest",
-            "images": images,
-            "videos": videos
-        })
-
-    except Exception as e:
-        return jsonify({
-            "status": False,
-            "platform": "pinterest",
-            "error": str(e)
-        }), 500
-
+# -------------------------
+# Run
+# -------------------------
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
