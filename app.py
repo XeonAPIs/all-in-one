@@ -8,15 +8,15 @@ app = Flask(__name__)
 FB_API = "https://serverless-tooly-gateway-6n4h522y.ue.gateway.dev/facebook/video"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0"
 }
 
 
 @app.after_request
-def cors(response):
+def add_cors_headers(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
     return response
 
 
@@ -24,17 +24,12 @@ def cors(response):
 def home():
     return jsonify({
         "status": True,
-        "owner": "Xeon Vro",
-        "apis": {
-            "instagram": "/insta?url=",
-            "facebook": "/fb?url=",
-            "pinterest": "/pin?url="
-        }
+        "owner": "Xeon Vro"
     })
 
 
 # =========================
-# Instagram (Redvid)
+# Instagram
 # =========================
 
 @app.route("/insta")
@@ -44,8 +39,7 @@ def insta():
     if not url:
         return jsonify({
             "status": False,
-            "owner": "Xeon Vro",
-            "message": "No URL provided"
+            "owner": "Xeon Vro"
         }), 400
 
     try:
@@ -76,39 +70,29 @@ def insta():
 
         view = data.get("view", "")
 
-        download_match = re.search(
-            r'href="([^"]+)"\s+class="download-video"',
-            view,
-            re.I
-        )
-
-        thumbnail_match = re.search(
-            r'<img[^>]+src="([^"]+thumbnail-proxy[^"]+)"',
-            view,
-            re.I
-        )
-
-        if download_match:
+        if 'class="download-video"' in view:
             return jsonify({
                 "status": True,
                 "owner": "Xeon Vro",
-                "platform": "instagram",
-                "type": "video",
-                "media": download_match.group(1),
-                "thumbnail": thumbnail_match.group(1) if thumbnail_match else None
+                "type": "video"
+            })
+
+        if "thumbnail-image" in view:
+            return jsonify({
+                "status": True,
+                "owner": "Xeon Vro",
+                "type": "image"
             })
 
         return jsonify({
             "status": False,
-            "owner": "Xeon Vro",
-            "message": "Media not found"
+            "owner": "Xeon Vro"
         }), 404
 
-    except Exception as e:
+    except Exception:
         return jsonify({
             "status": False,
-            "owner": "Xeon Vro",
-            "error": str(e)
+            "owner": "Xeon Vro"
         }), 500
 
 
@@ -123,7 +107,7 @@ def fb():
     if not url:
         return jsonify({
             "status": False,
-            "message": "Missing Facebook URL"
+            "owner": "Xeon Vro"
         }), 400
 
     try:
@@ -139,16 +123,14 @@ def fb():
 
         return jsonify({
             "status": data.get("success", False),
-            "platform": "facebook",
-            "title": data.get("title"),
-            "videos": data.get("videos", {})
+            "owner": "Xeon Vro",
+            "type": "video"
         })
 
-    except Exception as e:
+    except Exception:
         return jsonify({
             "status": False,
-            "platform": "facebook",
-            "error": str(e)
+            "owner": "Xeon Vro"
         }), 500
 
 
@@ -163,7 +145,7 @@ def pin():
     if not url:
         return jsonify({
             "status": False,
-            "message": "Missing Pinterest URL"
+            "owner": "Xeon Vro"
         }), 400
 
     try:
@@ -175,7 +157,7 @@ def pin():
         ):
             return jsonify({
                 "status": False,
-                "message": "Invalid Pinterest URL"
+                "owner": "Xeon Vro"
             }), 400
 
         response = requests.get(
@@ -188,28 +170,28 @@ def pin():
 
         html = response.text
 
-        images = list(set(re.findall(
+        images = re.findall(
             r"https://i\.pinimg\.com/[^\s'\"<>]+?\.(?:jpg|jpeg|png|webp)",
             html
-        )))
+        )
 
-        videos = list(set(re.findall(
+        videos = re.findall(
             r"https://(?:v|v1|i)\.pinimg\.com/[^\s'\"<>]+?\.mp4",
             html
-        )))
+        )
+
+        media_type = "video" if videos else "image"
 
         return jsonify({
             "status": True,
-            "platform": "pinterest",
-            "images": images,
-            "videos": videos
+            "owner": "Xeon Vro",
+            "type": media_type
         })
 
-    except Exception as e:
+    except Exception:
         return jsonify({
             "status": False,
-            "platform": "pinterest",
-            "error": str(e)
+            "owner": "Xeon Vro"
         }), 500
 
 
