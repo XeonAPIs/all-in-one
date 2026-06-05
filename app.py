@@ -1,35 +1,46 @@
 from flask import Flask, request, jsonify
-import instaloader
-import os
+import requests
 import re
+import os
+import json
+from urllib.parse import urlparse
+from http.cookiejar import MozillaCookieJar
 
 app = Flask(__name__)
 
-# -------------------------
-# Instaloader Setup
-# -------------------------
+FB_API = "https://serverless-tooly-gateway-6n4h522y.ue.gateway.dev/facebook/video"
 
-L = instaloader.Instaloader(
-    download_pictures=False,
-    download_videos=False,
-    download_video_thumbnails=False,
-    save_metadata=False,
-    compress_json=False,
-)
+HEADERS = {
+    "User-Agent": "Mozilla/5.0"
+}
 
-IG_USERNAME = os.getenv("IG_USERNAME")
-IG_PASSWORD = os.getenv("IG_PASSWORD")
 
-if IG_USERNAME and IG_PASSWORD:
-    try:
-        L.login(IG_USERNAME, IG_PASSWORD)
-        print("Instagram login successful")
-    except Exception as e:
-        print(f"Instagram login failed: {e}")
+def get_instagram_session():
+    session = requests.Session()
 
-# -------------------------
-# CORS
-# -------------------------
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://www.instagram.com/",
+        "Accept-Language": "en-US,en;q=0.9"
+    })
+
+    if os.path.exists("cookies.txt"):
+        try:
+            cj = MozillaCookieJar("cookies.txt")
+            cj.load(ignore_discard=True, ignore_expires=True)
+
+            for cookie in cj:
+                session.cookies.set(
+                    cookie.name,
+                    cookie.value,
+                    domain=cookie.domain
+                )
+
+        except Exception as e:
+            print("Cookie Error:", e)
+
+    return session
+
 
 @app.after_request
 def add_cors_headers(response):
@@ -38,22 +49,28 @@ def add_cors_headers(response):
     response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
     return response
 
-# -------------------------
-# Home
-# -------------------------
 
 @app.route("/")
 def home():
     return jsonify({
         "status": True,
-        "platform": "instagram",
-        "endpoint": "/insta?url="
+        "owner": "Xeon Vro",
+        "apis": {
+            "instagram": "/insta?url=",
+            "facebook": "/fb?url=",
+            "pinterest": "/pin?url="
+        }
     })
 
-# -------------------------
-# Instagram Downloader
-# -------------------------
 
+@app.route("/favicon.ico")
+def favicon():
+    return "", 204
+
+
+# ==================================
+# Instagram Downloader
+# ==================================
 @app.route("/insta")
 def insta():
 
@@ -69,67 +86,201 @@ def insta():
 
         url = url.split("?")[0]
 
-        match = re.search(
-            r"/(?:reel|p|tv)/([^/?]+)/?",
-            url
+        session = get_instagram_session()
+
+        response = session.get(
+            url,
+            timeout=30,
+            allow_redirects=True
         )
 
-        if not match:
+        response.raise_for_status()
+
+        html = response.text
+
+        media_url = None
+        media_type = None
+
+        video_match = re.search(
+            r'"video_url":"([^"]+)"',
+            html
+        )
+
+        if video_match:
+            media_url = (
+                video_match.group(1)
+                .replace("\\u0026", "&")
+                .replace("\\/", "/")
+            )
+            media_type = "video"
+
+        if not media_url:
+            image_match = re.search(
+                r'"display_url":"([^"]+)"',
+                html
+            )
+
+            if image_match:
+                media_url = (
+                    image_match.group(1)
+                    .replace("\\u0026", "&")
+                    .replace("\\/", "/")
+                )
+                media_type = "image"
+
+        if not media_url:
+
+            json_match = re.search(
+                r'<script type="application/ld\+json">(.*?)</script>',
+                html,
+                re.DOTALL
+            )
+
+            if json_match:
+
+                data = json.loads(
+                    json_match.group(1)
+                )
+
+                media_url = (
+                    data.get("contentUrl")
+                    or data.get("thumbnailUrl")
+                )
+
+                media_type = (
+                    "video"
+                    if data.get("contentUrl")
+                    else "image"
+                )
+
+        if not media_url:
             return jsonify({
                 "status": False,
-                "message": "Invalid Instagram URL"
-            }), 400
-
-        shortcode = match.group(1)
-
-        post = instaloader.Post.from_shortcode(
-            L.context,
-            shortcode
-        )
-
-        media = []
-
-        # Carousel posts
-        if post.typename == "GraphSidecar":
-
-            for node in post.get_sidecar_nodes():
-
-                media.append({
-                    "type": "video" if node.is_video else "image",
-                    "url": node.video_url if node.is_video else node.display_url
-                })
-
-        # Single post
-        else:
-
-            media.append({
-                "type": "video" if post.is_video else "image",
-                "url": post.video_url if post.is_video else post.url
-            })
+                "platform": "instagram",
+                "message": "Unable to extract media"
+            }), 404
 
         return jsonify({
             "status": True,
             "platform": "instagram",
-            "shortcode": shortcode,
-            "username": post.owner_username,
-            "caption": post.caption or "",
-            "likes": post.likes,
-            "comments": post.comments,
-            "media": media
+            "type": media_type,
+            "media": media_url
         })
 
     except Exception as e:
-
         return jsonify({
             "status": False,
-            "error_type": type(e).__name__,
+            "platform": "instagram",
             "error": str(e)
         }), 500
 
-# -------------------------
-# Run
-# -------------------------
+
+# ==================================
+# Facebook Downloader
+# ==================================
+@app.route("/fb")
+def fb():
+
+    url = request.args.get("url")
+
+    if not url:
+        return jsonify({
+            "status": False,
+            "message": "Missing Facebook URL"
+        }), 400
+
+    try:
+
+        response = requests.get(
+            FB_API,
+            params={"url": url},
+            timeout=30
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        return jsonify({
+            "status": data.get("success", False),
+            "platform": "facebook",
+            "title": data.get("title"),
+            "videos": data.get("videos", {})
+        })
+
+    except Exception as e:
+        return jsonify({
+            "status": False,
+            "platform": "facebook",
+            "error": str(e)
+        }), 500
+
+
+# ==================================
+# Pinterest Downloader
+# ==================================
+@app.route("/pin")
+def pin():
+
+    url = request.args.get("url")
+
+    if not url:
+        return jsonify({
+            "status": False,
+            "message": "Missing Pinterest URL"
+        }), 400
+
+    try:
+
+        parsed = urlparse(url)
+
+        if not any(
+            domain in parsed.netloc
+            for domain in ["pinterest.com", "pin.it"]
+        ):
+            return jsonify({
+                "status": False,
+                "message": "Invalid Pinterest URL"
+            }), 400
+
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            timeout=20
+        )
+
+        response.raise_for_status()
+
+        html = response.text
+
+        images = list(set(re.findall(
+            r"https://i\.pinimg\.com/[^\s'\"<>]+?\.(?:jpg|jpeg|png|webp)",
+            html
+        )))
+
+        videos = list(set(re.findall(
+            r"https://(?:v|v1|i)\.pinimg\.com/[^\s'\"<>]+?\.mp4",
+            html
+        )))
+
+        return jsonify({
+            "status": True,
+            "platform": "pinterest",
+            "images": images,
+            "videos": videos
+        })
+
+    except Exception as e:
+        return jsonify({
+            "status": False,
+            "platform": "pinterest",
+            "error": str(e)
+        }), 500
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
