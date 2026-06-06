@@ -121,6 +121,7 @@ def fb():
     if not url:
         return jsonify({
             "status": False,
+            "platform": "facebook",
             "message": "Missing Facebook URL"
         }), 400
 
@@ -138,8 +139,17 @@ def fb():
         return jsonify({
             "status": data.get("success", False),
             "platform": "facebook",
-            "title": data.get("title"),
-            "videos": data.get("videos", {})
+            "title": data.get("title", "Untitled"),
+            "videos": {
+                "hd": {
+                    "size": data.get("videos", {}).get("hd", {}).get("size"),
+                    "url": data.get("videos", {}).get("hd", {}).get("url")
+                },
+                "sd": {
+                    "size": data.get("videos", {}).get("sd", {}).get("size"),
+                    "url": data.get("videos", {}).get("sd", {}).get("url")
+                }
+            }
         })
 
     except Exception as e:
@@ -148,7 +158,6 @@ def fb():
             "platform": "facebook",
             "error": str(e)
         }), 500
-
 
 # =========================
 # Pinterest Downloader
