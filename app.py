@@ -162,6 +162,11 @@ def fb():
 # =========================
 # Pinterest Downloader
 # =========================
+
+IGNORE_LINKS = {
+    "https://i.pinimg.com/originals/d5/3b/01/d53b014d86a6b6761bf649a0ed813c2b.png"
+}
+
 @app.route("/pin")
 def pin():
 
@@ -170,15 +175,18 @@ def pin():
     if not url:
         return jsonify({
             "status": False,
+            "platform": "pinterest",
             "message": "Missing Pinterest URL"
         }), 400
 
     try:
+
         parsed = urlparse(url)
 
         if not any(domain in parsed.netloc for domain in ["pinterest.com", "pin.it"]):
             return jsonify({
                 "status": False,
+                "platform": "pinterest",
                 "message": "Invalid Pinterest URL"
             }), 400
 
@@ -192,21 +200,66 @@ def pin():
 
         html = response.text
 
-        images = list(set(re.findall(
+        result = {}
+
+        # -------- Images --------
+        image_urls = re.findall(
             r"https://i\.pinimg\.com/[^\s'\"<>]+?\.(?:jpg|jpeg|png|webp)",
             html
-        )))
+        )
 
-        videos = list(set(re.findall(
+        image_urls = [
+            u for u in set(image_urls)
+            if u not in IGNORE_LINKS
+        ]
+
+        if image_urls:
+
+            originals = [
+                u for u in image_urls
+                if "/originals/" in u
+            ]
+
+            if originals:
+                result["images"] = sorted(set(originals))
+
+            else:
+                res_map = {}
+
+                for u in image_urls:
+                    m = re.search(r"/(\d+)x/", u)
+
+                    size = int(m.group(1)) if m else 0
+
+                    res_map.setdefault(size, []).append(u)
+
+                if res_map:
+                    largest = max(res_map.keys())
+                    result["images"] = sorted(
+                        set(res_map[largest])
+                    )
+
+        # -------- Videos --------
+        video_urls = re.findall(
             r"https://(?:v|v1|i)\.pinimg\.com/[^\s'\"<>]+?\.mp4",
             html
-        )))
+        )
+
+        if video_urls:
+            result["videos"] = sorted(
+                set(video_urls),
+                key=len,
+                reverse=True
+            )
+
+        result.setdefault("images", [])
+        result.setdefault("videos", [])
 
         return jsonify({
             "status": True,
             "platform": "pinterest",
-            "images": images,
-            "videos": videos
+            "images": result["images"],
+            "videos": result["videos"]
         })
 
     except Exception as e:
@@ -215,8 +268,3 @@ def pin():
             "platform": "pinterest",
             "error": str(e)
         }), 500
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port)
