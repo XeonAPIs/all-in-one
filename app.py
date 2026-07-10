@@ -7,7 +7,17 @@ from urllib.parse import urlparse
 app = Flask(__name__)
 
 FB_API = "https://serverless-tooly-gateway-6n4h522y.ue.gateway.dev/facebook/video"
+FB_FALLBACK_API = "https://getindevice.com/api/download/"
 IG_API = "https://7kpgrnvomroojzq6fw5e6qkogq0zyiuv.lambda-url.eu-north-1.on.aws/api/instagram/fetch"
+
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/json,*/*",
+}
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0"
@@ -139,56 +149,74 @@ def fb():
         }), 400
 
     try:
-        resolved_url = url
+        resolved_url = _resolve_facebook_url(url)
 
-        # Facebook "share/" links are shortlinks that redirect to the real
-        # post/video URL. The extractor API often can't resolve these itself,
-        # which is why it was returning "0 MB" / null instead of a real HD link.
-        if "/share/" in url or "fb.watch" in url:
-            try:
-                head_resp = requests.get(
-                    url,
-                    headers={
-                        "User-Agent": (
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/125.0.0.0 Safari/537.36"
-                        )
-                    },
-                    allow_redirects=True,
-                    timeout=15
-                )
-                if head_resp.url:
-                    resolved_url = head_resp.url
-            except requests.exceptions.RequestException:
-                # If resolving fails, fall back to the original URL
-                resolved_url = url
+        data = _call_fb_extractor(resolved_url)
 
-        response = requests.get(
-            FB_API,
-            params={"url": resolved_url},
-            timeout=30
-        )
+        videos = data.get("videos", {}) or {}
+        hd_url = videos.get("hd", {}).get("url")
+        sd_url = videos.get("sd", {}).get("url")
 
-        response.raise_for_status()
+        # If the extractor came back empty on the first try, retry once —
+        # this API occasionally needs a second attempt for slower Facebook
+        # scrapes (cold cache on their end, transient hiccup, etc).
+        if not hd_url and not sd_url:
+            data = _call_fb_extractor(resolved_url)
+            videos = data.get("videos", {}) or {}
+            hd_url = videos.get("hd", {}).get("url")
+            sd_url = videos.get("sd", {}).get("url")
 
-        data = response.json()
+        # Still nothing? Some specific videos that the primary extractor
+        # can't handle DO work through getindevice.com — try it as a
+        # fallback before giving up entirely.
+        if not hd_url and not sd_url:
+            fallback = _call_fb_fallback(resolved_url)
+            if fallback:
+                return jsonify({
+                    "status": True,
+                    "platform": "facebook",
+                    "title": fallback.get("title") or "Untitled",
+                    "videos": {
+                        "hd": {
+                            "size": fallback.get("size"),
+                            "url": fallback.get("url")
+                        },
+                        "sd": {
+                            "size": None,
+                            "url": None
+                        }
+                    }
+                })
 
         return jsonify({
-            "status": data.get("success", False),
+            "status": bool(hd_url or sd_url),
             "platform": "facebook",
             "title": data.get("title", "Untitled"),
             "videos": {
                 "hd": {
-                    "size": data.get("videos", {}).get("hd", {}).get("size"),
-                    "url": data.get("videos", {}).get("hd", {}).get("url")
+                    "size": videos.get("hd", {}).get("size"),
+                    "url": hd_url
                 },
                 "sd": {
-                    "size": data.get("videos", {}).get("sd", {}).get("size"),
-                    "url": data.get("videos", {}).get("sd", {}).get("url")
+                    "size": videos.get("sd", {}).get("size"),
+                    "url": sd_url
                 }
             }
         })
+
+    except requests.exceptions.Timeout:
+        return jsonify({
+            "status": False,
+            "platform": "facebook",
+            "message": "Upstream extractor timed out. Please try again."
+        }), 504
+
+    except requests.exceptions.HTTPError as e:
+        return jsonify({
+            "status": False,
+            "platform": "facebook",
+            "message": f"Upstream extractor returned an error: {e}"
+        }), 502
 
     except Exception as e:
         return jsonify({
@@ -196,6 +224,96 @@ def fb():
             "platform": "facebook",
             "error": str(e)
         }), 500
+
+
+def _resolve_facebook_url(url):
+    """
+    Facebook shortlinks (share/, fb.watch, and reel share links) redirect to
+    the real canonical post/video URL. The extractor API can't always follow
+    that redirect itself, so we resolve it here first and pass the final
+    canonical URL along instead.
+    """
+    try:
+        head_resp = requests.get(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/125.0.0.0 Safari/537.36"
+                )
+            },
+            allow_redirects=True,
+            timeout=15
+        )
+        if head_resp.url:
+            return head_resp.url
+    except requests.exceptions.RequestException:
+        pass
+
+    return url
+
+
+def _call_fb_extractor(resolved_url):
+    """Call the upstream Facebook extractor API and return its parsed JSON."""
+    response = requests.get(
+        FB_API,
+        params={"url": resolved_url},
+        timeout=60
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def _call_fb_fallback(resolved_url):
+    """
+    Fallback extractor (getindevice.com). This site rejects bare API calls
+    with 403 because it expects a browser-like session — so we first load
+    its homepage to pick up cookies, then reuse that session for the
+    actual POST. Returns the best available video dict, or None on failure.
+    """
+    try:
+        session = requests.Session()
+        session.headers.update(BROWSER_HEADERS)
+
+        # Establish cookies/session by hitting the homepage first
+        session.get("https://getindevice.com/", timeout=15)
+
+        resp = session.post(
+            FB_FALLBACK_API,
+            json={"url": resolved_url},
+            headers={
+                "Content-Type": "application/json",
+                "Origin": "https://getindevice.com",
+                "Referer": "https://getindevice.com/",
+            },
+            timeout=30
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        videos = data.get("videos", []) or []
+        if not videos:
+            return None
+
+        # Pick the largest/best available video (by size if present)
+        best = sorted(
+            videos,
+            key=lambda v: (v.get("size") or 0),
+            reverse=True
+        )[0]
+
+        if not best.get("url"):
+            return None
+
+        return {
+            "title": data.get("title"),
+            "url": best.get("url"),
+            "size": best.get("size"),
+        }
+
+    except requests.exceptions.RequestException:
+        return None
 
 # =========================
 # Pinterest Downloader
