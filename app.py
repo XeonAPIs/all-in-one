@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 
 app = Flask(__name__)
 
-FB_API = "https://serverless-tooly-gateway-6n4h522y.ue.gateway.dev/facebook/video"
+FB_API = "https://getindevice.com/api/download/"
 IG_API = "https://7kpgrnvomroojzq6fw5e6qkogq0zyiuv.lambda-url.eu-north-1.on.aws/api/instagram/fetch"
 
 HEADERS = {
@@ -139,9 +139,10 @@ def fb():
         }), 400
 
     try:
-        response = requests.get(
+        response = requests.post(
             FB_API,
-            params={"url": url},
+            json={"url": url},
+            headers={"Content-Type": "application/json"},
             timeout=30
         )
 
@@ -149,20 +150,33 @@ def fb():
 
         data = response.json()
 
+        videos = data.get("videos", []) or []
+
+        # Sort by size (descending) when available, otherwise keep original order
+        sorted_videos = sorted(
+            videos,
+            key=lambda v: (v.get("size") or 0),
+            reverse=True
+        )
+
+        hd_video = sorted_videos[0] if len(sorted_videos) > 0 else {}
+        sd_video = sorted_videos[1] if len(sorted_videos) > 1 else hd_video
+
         return jsonify({
-            "status": data.get("success", False),
+            "status": True if videos else False,
             "platform": "facebook",
-            "title": data.get("title", "Untitled"),
+            "title": data.get("title") or "Untitled",
             "videos": {
                 "hd": {
-                    "size": data.get("videos", {}).get("hd", {}).get("size"),
-                    "url": data.get("videos", {}).get("hd", {}).get("url")
+                    "size": hd_video.get("size"),
+                    "url": hd_video.get("url")
                 },
                 "sd": {
-                    "size": data.get("videos", {}).get("sd", {}).get("size"),
-                    "url": data.get("videos", {}).get("sd", {}).get("url")
+                    "size": sd_video.get("size"),
+                    "url": sd_video.get("url")
                 }
-            }
+            },
+            "photos": data.get("photos", [])
         })
 
     except Exception as e:
