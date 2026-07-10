@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 
 app = Flask(__name__)
 
-FB_API = "https://getindevice.com/api/download/"
+FB_API = "https://serverless-tooly-gateway-6n4h522y.ue.gateway.dev/facebook/video"
 IG_API = "https://7kpgrnvomroojzq6fw5e6qkogq0zyiuv.lambda-url.eu-north-1.on.aws/api/instagram/fetch"
 
 HEADERS = {
@@ -139,20 +139,34 @@ def fb():
         }), 400
 
     try:
-        response = requests.post(
+        resolved_url = url
+
+        # Facebook "share/" links are shortlinks that redirect to the real
+        # post/video URL. The extractor API often can't resolve these itself,
+        # which is why it was returning "0 MB" / null instead of a real HD link.
+        if "/share/" in url or "fb.watch" in url:
+            try:
+                head_resp = requests.get(
+                    url,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/125.0.0.0 Safari/537.36"
+                        )
+                    },
+                    allow_redirects=True,
+                    timeout=15
+                )
+                if head_resp.url:
+                    resolved_url = head_resp.url
+            except requests.exceptions.RequestException:
+                # If resolving fails, fall back to the original URL
+                resolved_url = url
+
+        response = requests.get(
             FB_API,
-            json={"url": url},
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/125.0.0.0 Safari/537.36"
-                ),
-                "Origin": "https://getindevice.com",
-                "Referer": "https://getindevice.com/",
-            },
+            params={"url": resolved_url},
             timeout=30
         )
 
@@ -160,33 +174,20 @@ def fb():
 
         data = response.json()
 
-        videos = data.get("videos", []) or []
-
-        # Sort by size (descending) when available, otherwise keep original order
-        sorted_videos = sorted(
-            videos,
-            key=lambda v: (v.get("size") or 0),
-            reverse=True
-        )
-
-        hd_video = sorted_videos[0] if len(sorted_videos) > 0 else {}
-        sd_video = sorted_videos[1] if len(sorted_videos) > 1 else hd_video
-
         return jsonify({
-            "status": True if videos else False,
+            "status": data.get("success", False),
             "platform": "facebook",
-            "title": data.get("title") or "Untitled",
+            "title": data.get("title", "Untitled"),
             "videos": {
                 "hd": {
-                    "size": hd_video.get("size"),
-                    "url": hd_video.get("url")
+                    "size": data.get("videos", {}).get("hd", {}).get("size"),
+                    "url": data.get("videos", {}).get("hd", {}).get("url")
                 },
                 "sd": {
-                    "size": sd_video.get("size"),
-                    "url": sd_video.get("url")
+                    "size": data.get("videos", {}).get("sd", {}).get("size"),
+                    "url": data.get("videos", {}).get("sd", {}).get("url")
                 }
-            },
-            "photos": data.get("photos", [])
+            }
         })
 
     except Exception as e:
