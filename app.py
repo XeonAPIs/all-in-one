@@ -1,6 +1,5 @@
 from flask import Flask, request, jsonify
 import requests
-import instaloader
 import re
 import os
 from urllib.parse import urlparse
@@ -8,19 +7,11 @@ from urllib.parse import urlparse
 app = Flask(__name__)
 
 FB_API = "https://serverless-tooly-gateway-6n4h522y.ue.gateway.dev/facebook/video"
+IG_API = "https://7kpgrnvomroojzq6fw5e6qkogq0zyiuv.lambda-url.eu-north-1.on.aws/api/instagram/fetch"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0"
 }
-
-# Instagram Loader
-L = instaloader.Instaloader(
-    download_pictures=False,
-    download_videos=False,
-    download_video_thumbnails=False,
-    save_metadata=False,
-    compress_json=False
-)
 
 
 @app.after_request
@@ -60,51 +51,73 @@ def insta():
     if not url:
         return jsonify({
             "status": False,
-            "owner": "Xeon Vro",
+            "owner": "XeonModz",
+            "platform": "instagram",
             "message": "No URL provided"
         }), 400
 
+    if "instagram.com" not in url:
+        return jsonify({
+            "status": False,
+            "owner": "XeonModz",
+            "platform": "instagram",
+            "message": "Invalid Instagram URL"
+        }), 400
+
     try:
-        url = url.split("?")[0]
-
-        match = re.search(
-            r"(?:reel|p|tv)/([^/?]+)",
-            url
+        response = requests.post(
+            IG_API,
+            json={"url": url},
+            headers={"Content-Type": "application/json"},
+            timeout=30
         )
 
-        if not match:
-            return jsonify({
-                "status": False,
-                "owner": "Xeon Vro",
-                "message": "Invalid Instagram URL"
-            }), 400
+        response.raise_for_status()
 
-        shortcode = match.group(1)
+        raw = response.json()
+        data = raw.get("data", {}) if isinstance(raw, dict) else {}
+        post_info = data.get("postInfo", {}) or {}
+        media_items = data.get("mediaItems", []) or []
 
-        post = instaloader.Post.from_shortcode(
-            L.context,
-            shortcode
-        )
-
-        if post.is_video:
-            media = post.video_url
-            media_type = "video"
-        else:
-            media = post.url
-            media_type = "image"
+        media = []
+        for item in media_items:
+            media.append({
+                "type": item.get("type"),
+                "url": item.get("url"),
+                "thumbnail": item.get("thumbnail"),
+                "dimensions": item.get("dimensions")
+            })
 
         return jsonify({
-            "status": True,
-            "owner": "Xeon Vro",
+            "status": raw.get("success", False) if isinstance(raw, dict) else False,
+            "owner": "XeonModz",
             "platform": "instagram",
-            "type": media_type,
+            "caption": post_info.get("caption", ""),
+            "mediaCount": len(media),
+            "isCarousel": len(media) > 1,
             "media": media
         })
+
+    except requests.exceptions.Timeout:
+        return jsonify({
+            "status": False,
+            "owner": "XeonModz",
+            "platform": "instagram",
+            "error": "Upstream request timed out"
+        }), 504
+
+    except requests.exceptions.RequestException as e:
+        return jsonify({
+            "status": False,
+            "owner": "XeonModz",
+            "platform": "instagram",
+            "error": str(e)
+        }), 500
 
     except Exception as e:
         return jsonify({
             "status": False,
-            "owner": "Xeon Vro",
+            "owner": "XeonModz",
             "platform": "instagram",
             "error": str(e)
         }), 500
@@ -268,3 +281,7 @@ def pin():
             "platform": "pinterest",
             "error": str(e)
         }), 500
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=True)
